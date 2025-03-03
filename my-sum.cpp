@@ -44,7 +44,8 @@ struct SharedMemory {
 
 //function prototypes
 void process_input_file(const string &input_file, int *A, int n);
-
+void write_output_file(const string &output_file, int *B, int n);
+void prefix_sum(SharedMemory *shared_memory, int pid);
 
 // main
 int main(int argc, char *argv[]) {
@@ -87,6 +88,8 @@ int main(int argc, char *argv[]) {
     shared_memory->A = (int*)((char*)shared_memory + sizeof(SharedMemory)); //skip of SharedMemory struct 
     shared_memory->B = shared_memory->A + n;
 
+     //as of now the segment looks like [SharedData struct][Array A (n elements)][Array B (n elements)]
+
     //initiliaze shared_memory variables
     shared_memory->n = n;
     shared_memory->m = m;
@@ -101,7 +104,43 @@ int main(int argc, char *argv[]) {
         shared_memory->B[i] = shared_memory->A[i];
     }
     
-    //as of now the segment looks like [SharedData struct][Array A (n elements)][Array B (n elements)]
+    //create worker processes
+    vector<pid_t> child_processes;
+    for (int i = 0; i < m; i ++){
+        pid_t pid = fork();
+
+        //if in child proccess
+        if (pid == 0){
+            prefix_sum(shared_memory, pid);
+
+            //detach from segment
+            shmdt(shared_memory);
+            exit(0);
+        }
+        //parent process
+        else if (pid > 0){
+            child_processes.push_back(pid);
+        }
+        //failure
+        else {
+            fprintf(stderr, "Error: process creation failed.\n");
+            exit(1);
+        }
+    }
+
+    //wait for all proccesses to finish
+    for (pid_t child : child_processes) {
+        waitpid(child, nullptr, 0); //wait for child to finish
+    }
+
+    //write output file
+    write_output_file(output_file, shared_memory->B, n);
+    
+    //clean memory
+    delete shared_memory->barrier; //deallocate memory for barrier
+    shmdt(shared_memory); //detach process from memory segment
+    shmctl(shmid, IPC_RMID, nullptr); //delete shared memory segment completely
+
     return 0;
 }
 
@@ -111,4 +150,15 @@ void process_input_file(const string &input_file, int *A, int n) {
         input_file_stream >> A[i];
     }
     input_file_stream.close();
+}
+
+void write_output_file(const string &output_file, int *B, int n) {
+    ofstream output_file_steam(output_file);
+    for (int i = 0; i < n; i++){
+        output_file_steam << B[i] << endl;
+    }
+    output_file_steam.close();
+}
+void prefix_sum(SharedMemory *shared_memory, int pid){
+
 }
