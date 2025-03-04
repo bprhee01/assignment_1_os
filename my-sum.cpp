@@ -1,7 +1,7 @@
 /*
 Ben Rhee
 OS assignment 1
-Prefix Sum parrallelized through hillis and steele algorithm
+Prefix Sum parallelized through Hillis and Steele algorithm
 DO "./my-sum num_elems num_cores input_file output_file"
 */
 using namespace std;
@@ -14,67 +14,70 @@ using namespace std;
 #include <sys/wait.h>
 #include <sys/shm.h>
 #include <sys/stat.h>
+#include <algorithm>
 
-// shared data 
+// Shared data structure
 struct SharedMemory {
-    int n;                  // Number of elements
-    int m;                  // Number of processes
-    int *A;                 // Input array
-    int *B;                 // Output array
-    int max_runtime;        // Maximum iterations (log2(n))
-    int layer;              // Current layer
-    int barrier_count;      // Barrier counter for synchronization
-    int barrier_phase;      // Barrier phase for synchronization
+    int n;
+    int m;
+    int *A;
+    int *B;
+    int max_runtime;
+    int barrier_count;
+    int barrier_phase;
 };
 
 
 class Barrier {
 private:
-    int *current_process_count;    // Pointer to shared current_process_counter
-    int *phase;    // Pointer to shared phase
-    int total_processes;     // Total number of processes
+    int *count;
+    int *phase;
+    int num_processes;
+    
 public:
-    Barrier(int *current_process_count_ptr, int *phase_ptr, int total_processes) {
-        current_process_count = current_process_count_ptr;
+    Barrier(int *count_ptr, int *phase_ptr, int total_processes) {
+        count = count_ptr;
         phase = phase_ptr;
-        total_processes = total_processes;
-        *current_process_count = 0;
+        num_processes = total_processes;
+        *count = 0;
         *phase = 0;
     }
     
     void arrive_and_wait(int pid) {
-        //  if og process
+        int my_phase = *phase;
+        
+        // main process
         if (pid == 0) {
-            while (*current_process_count < total_processes - 1) {
+            while (*count < num_processes - 1) {
                 usleep(10);
             }
-            // Reset current_process_counter and toggle phase
-            *current_process_count = 0;
+            
+            // Reset counter and toggle phase to release other processes
+            *count = 0;
             *phase = 1 - *phase;
-        // worked processes
+        // child processes
         } else {
-            (*current_process_count)++;
-            int current_phase = *phase;
-            while (current_phase == *phase) {
-                usleep(10); 
+            (*count)++;
+            
+            while (my_phase == *phase) {
+                usleep(10);
             }
         }
     }
 };
 
-//function prototypes
+// Function prototypes
 void process_input_file(const string &input_file, int *A, int n);
 void write_output_file(const string &output_file, int *B, int n);
 void prefix_sum(SharedMemory *shared_memory, int pid);
 
-// main
+// Main function
 int main(int argc, char *argv[]) {
-    // parse command-line arguments
+    // Parse command-line arguments
     if (argc != 5) {
         fprintf(stderr, "Usage: %s <n> <m> <input_file> <output_file>\n", argv[0]);
         exit(1);
     }
-
     int n = atoi(argv[1]);
     int m = atoi(argv[2]);
     char *input_file = argv[3];
@@ -84,6 +87,12 @@ int main(int argc, char *argv[]) {
     if (n <= 0 || m <= 0) {
         fprintf(stderr, "Error: n and m must be greater than 0.\n");
         exit(1);
+    }
+    
+    // Limit m to n if m > n (no need for more processes than elements)
+    if (m > n) {
+        m = n;
+        cout << "Warning: Reduced number of processes to " << m << " (equal to number of elements)" << endl;
     }
 
     // Initialize shared memory
@@ -114,7 +123,6 @@ int main(int argc, char *argv[]) {
     shared_memory->n = n;
     shared_memory->m = m;
     shared_memory->max_runtime = static_cast<int>(ceil(log2(n)));
-    shared_memory->layer = 0;
     shared_memory->barrier_count = 0;
     shared_memory->barrier_phase = 0;
 
@@ -125,9 +133,6 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < n; i++) {
         shared_memory->B[i] = shared_memory->A[i];
     }
-    
-    // Create barrier with shared memory
-    Barrier barrier(&shared_memory->barrier_count, &shared_memory->barrier_phase, m);
     
     // Create worker processes
     vector<pid_t> child_processes;
@@ -170,72 +175,92 @@ int main(int argc, char *argv[]) {
 
 void process_input_file(const string &input_file, int *A, int n) {
     ifstream input_file_stream(input_file);
+    if (!input_file_stream) {
+        cerr << "Error: Cannot open input file " << input_file << endl;
+        exit(1);
+    }
+    
     for (int i = 0; i < n; i++) {
-        input_file_stream >> A[i];
+        if (!(input_file_stream >> A[i])) {
+            cerr << "Error: Not enough elements in the input file" << endl;
+            exit(1);
+        }
     }
     input_file_stream.close();
 }
 
 void write_output_file(const string &output_file, int *B, int n) {
-    ofstream output_file_steam(output_file);
-    for (int i = 0; i < n; i++) {
-        output_file_steam << B[i] << endl;
+    ofstream output_file_stream(output_file);
+    if (!output_file_stream) {
+        cerr << "Error: Cannot open output file " << output_file << endl;
+        exit(1);
     }
-    output_file_steam.close();
+    
+    for (int i = 0; i < n; i++) {
+        output_file_stream << B[i] << endl;
+    }
+    output_file_stream.close();
 }
+
 
 void prefix_sum(SharedMemory *shared_memory, int pid) {
     int n = shared_memory->n; // Total elements
     int m = shared_memory->m; // Total processes
-    int max_runtime = shared_memory->max_runtime; // Max runtime
+    int max_runtime = shared_memory->max_runtime; // Max iterations (log2(n))
+    
+    // Calculate workload for each process
     int elems_per_process = n / m;
     int leftover_elems = n % m;
-
+    
     int start_idx, end_idx;
-
+    
     // Calculate start and end indices for this process
     if (pid < leftover_elems) {
         // First 'leftover_elems' processes handle (elems_per_process + 1) elements each
         start_idx = pid * (elems_per_process + 1);
-        end_idx = start_idx + elems_per_process + 1;
+        end_idx = start_idx + elems_per_process;
     } else {
         // Remaining processes handle elems_per_process elements each
-        start_idx = (leftover_elems * (elems_per_process + 1)) + 
-                   ((pid - leftover_elems) * elems_per_process);
-        end_idx = start_idx + elems_per_process;
+        start_idx = leftover_elems * (elems_per_process + 1) + 
+                   (pid - leftover_elems) * elems_per_process;
+        end_idx = start_idx + elems_per_process - 1;
     }
-
+    
+    // adjust end idx if needed
+    if (end_idx >= n) {
+        end_idx = n - 1;
+    }
+    
     Barrier barrier(&shared_memory->barrier_count, &shared_memory->barrier_phase, m);
     
-    // initilize temporary array 
+    
+    // Temporary array 
     vector<int> temp(n);
-
+    
     // Hillis-Steele
     for (int layer = 0; layer < max_runtime; layer++) {
-        // update layer if needed
-        if (pid == 0) {
-            shared_memory->layer = layer;
-        }
-        
-        // Wait
+        // Synchronize bc of shared memory
         barrier.arrive_and_wait(pid);
         
-        // Copy current output to temp array
+        // init temp
         for (int i = 0; i < n; i++) {
             temp[i] = shared_memory->B[i];
         }
         
-        // Calculate distance of complement for this layer
+        barrier.arrive_and_wait(pid);
+        
+        // Calculate complement_distance for this layer
         int complement_distance = 1 << layer;
         
-        // Calculate sum
-        for (int i = start_idx; i < end_idx; i++) {
-            // only sum complement if it exists
+        // Update only the elements assigned to this process
+        for (int i = start_idx; i <= end_idx; i++) {
             if (i >= complement_distance) {
                 shared_memory->B[i] = temp[i] + temp[i - complement_distance];
             }
+    
         }
         
         barrier.arrive_and_wait(pid);
+        
     }
 }
