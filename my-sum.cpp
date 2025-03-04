@@ -21,13 +21,39 @@ class Barrier{
 private:
     int current_process_count;
     int total_process_count;
+    int *phase[2];
+    int current_phase;
 public:
     Barrier(int m){
         total_process_count = m;
         current_process_count = 0;
+        current_phase = 0;
+        phase[0] = new int[1]();
+        phase[1] = new int[1]();
+    }
+    ~Barrier(){
+        delete[] phase[0];
+        delete[] phase[1];
     }
     void arrive_and_wait(int pid){
+        if (pid == 0){
+            
+            while (current_process_count < total_process_count){
 
+            }
+
+            //reset counts and switch phase
+            current_process_count = 0;
+            current_phase = 1 - current_phase;
+            phase[current_phase][0] = 1 - phase[current_phase][0];
+        }
+        else {
+            current_process_count++;
+            int current_phase_for_worker = phase[current_phase][0];
+            while (current_phase_for_worker == phase[current_phase][0]){
+
+            }
+        }
     }
 };
 
@@ -39,7 +65,9 @@ struct SharedMemory {
     int m;
     int *A;
     int *B;
+    int max_runtime;
     Barrier *barrier;
+    int layer;
 };
 
 //function prototypes
@@ -93,6 +121,8 @@ int main(int argc, char *argv[]) {
     //initiliaze shared_memory variables
     shared_memory->n = n;
     shared_memory->m = m;
+    shared_memory->max_runtime = static_cast<int>(ceil(log2(n)));
+    shared_memory->layer = 0;
     shared_memory->barrier = new Barrier(m);
 
 
@@ -111,7 +141,7 @@ int main(int argc, char *argv[]) {
 
         //if in child proccess
         if (pid == 0){
-            prefix_sum(shared_memory, pid);
+            prefix_sum(shared_memory, i); // i keeps tracks of the actual process num, pid doesnt so use i instead
 
             //detach from segment
             shmdt(shared_memory);
@@ -160,5 +190,30 @@ void write_output_file(const string &output_file, int *B, int n) {
     output_file_steam.close();
 }
 void prefix_sum(SharedMemory *shared_memory, int pid){
+    int n = shared_memory->n; //total elems
+    int m = shared_memory->m; //total processes
+    int max_runtime = shared_memory->max_runtime; //max runtime for hillis steele
+    int elems_per_process = n / m;
+    int leftover_elems =  n % m;
+
+    int start_idx, end_idx;
+
+    // process elements [start,end). The first (leftover_elems) will process 1 more than elems_per_process
+    if (pid < leftover_elems){
+        start_idx = pid * elems_per_process + pid;
+        end_idx = start_idx + elems_per_process + 1;
+    }
+    else {
+        start_idx = (pid * elems_per_process) + leftover_elems ;
+        end_idx = start_idx + elems_per_process;
+    }
+
+    vector<int> temp(n);
+
+    for(int layer =  0; layer < max_runtime; layer ++) {
+        if (pid == 0){
+            shared_memory->layer = 0;
+        }
+    }
 
 }
