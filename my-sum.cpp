@@ -2,7 +2,7 @@
 Ben Rhee
 OS assignment 1
 Prefix Sum parrallelized through hillis and steele algorithm
-DO "./my-sum numElems numCores input_file output_file"
+DO "./my-sum num_elems num_cores input_file output_file"
 */
 using namespace std;
 #include <iostream>
@@ -15,59 +15,51 @@ using namespace std;
 #include <sys/shm.h>
 #include <sys/stat.h>
 
-
-// Barrier class
-class Barrier{
-private:
-    int current_process_count;
-    int total_process_count;
-    int *phase[2];
-    int current_phase;
-public:
-    Barrier(int m){
-        total_process_count = m;
-        current_process_count = 0;
-        current_phase = 0;
-        phase[0] = new int[1]();
-        phase[1] = new int[1]();
-    }
-    ~Barrier(){
-        delete[] phase[0];
-        delete[] phase[1];
-    }
-    void arrive_and_wait(int pid){
-        if (pid == 0){
-            
-            while (current_process_count < total_process_count){
-
-            }
-
-            //reset counts and switch phase
-            current_process_count = 0;
-            current_phase = 1 - current_phase;
-            phase[current_phase][0] = 1 - phase[current_phase][0];
-        }
-        else {
-            current_process_count++;
-            int current_phase_for_worker = phase[current_phase][0];
-            while (current_phase_for_worker == phase[current_phase][0]){
-
-            }
-        }
-    }
+// shared data 
+struct SharedMemory {
+    int n;                  // Number of elements
+    int m;                  // Number of processes
+    int *A;                 // Input array
+    int *B;                 // Output array
+    int max_runtime;        // Maximum iterations (log2(n))
+    int layer;              // Current layer
+    int barrier_count;      // Barrier counter for synchronization
+    int barrier_phase;      // Barrier phase for synchronization
 };
 
 
-
-// shared data structure
-struct SharedMemory {
-    int n;
-    int m;
-    int *A;
-    int *B;
-    int max_runtime;
-    Barrier *barrier;
-    int layer;
+class Barrier {
+private:
+    int *current_process_count;    // Pointer to shared current_process_counter
+    int *phase;    // Pointer to shared phase
+    int total_processes;     // Total number of processes
+public:
+    Barrier(int *current_process_count_ptr, int *phase_ptr, int total_processes) {
+        current_process_count = current_process_count_ptr;
+        phase = phase_ptr;
+        total_processes = total_processes;
+        *current_process_count = 0;
+        *phase = 0;
+    }
+    
+    void arrive_and_wait(int pid) {
+        //  if og process
+        if (pid == 0) {
+            while (*current_process_count < total_processes - 1) {
+                usleep(10);
+            }
+            // Reset current_process_counter and toggle phase
+            *current_process_count = 0;
+            *phase = 1 - *phase;
+        // worked processes
+        } else {
+            (*current_process_count)++;
+            int current_phase = *phase;
+            while (current_phase == *phase) {
+                usleep(10); 
+            }
+        }
+    }
 };
 
 //function prototypes
@@ -77,11 +69,12 @@ void prefix_sum(SharedMemory *shared_memory, int pid);
 
 // main
 int main(int argc, char *argv[]) {
-    // Parse command-line arguments
+    // parse command-line arguments
     if (argc != 5) {
         fprintf(stderr, "Usage: %s <n> <m> <input_file> <output_file>\n", argv[0]);
         exit(1);
     }
+
     int n = atoi(argv[1]);
     int m = atoi(argv[2]);
     char *input_file = argv[3];
@@ -93,18 +86,19 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    //  init shared memory
-    size_t size_segment = sizeof(SharedMemory) + (2 * n * sizeof(double)); // shared mem struct + size of the two arrays
-    // create shared memory segment
-    int shmid = shmget(IPC_PRIVATE, size_segment, IPC_CREAT | IPC_EXCL | S_IRUSR | S_IWUSR); // private for segments that know ID, size_segment, create segment and give read/write perms
+    // Initialize shared memory
+    size_t size_segment = sizeof(SharedMemory) + (2 * n * sizeof(int)); 
     
-    if (shmid == -1){
+    // Create shared memory segment
+    int shmid = shmget(IPC_PRIVATE, size_segment, IPC_CREAT | IPC_EXCL | S_IRUSR | S_IWUSR);
+    
+    if (shmid == -1) {
         fprintf(stderr, "Error: segment creation failed.\n");
         exit(1);
     }
 
-    //attach segment
-    SharedMemory *shared_memory = (SharedMemory*)shmat( shmid, nullptr, 0); //attaches schmat segment with id
+    // Attach segment
+    SharedMemory *shared_memory = (SharedMemory*)shmat(shmid, nullptr, 0);
 
     if (shared_memory == (void*)-1) {
         fprintf(stderr, "Error: segment attachment failed.\n");
@@ -112,71 +106,71 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    // setup memory address pointers
-    shared_memory->A = (int*)((char*)shared_memory + sizeof(SharedMemory)); //skip of SharedMemory struct 
+    // Setup memory address pointers
+    shared_memory->A = (int*)((char*)shared_memory + sizeof(SharedMemory));
     shared_memory->B = shared_memory->A + n;
 
-     //as of now the segment looks like [SharedData struct][Array A (n elements)][Array B (n elements)]
-
-    //initiliaze shared_memory variables
+    // Initialize shared_memory variables
     shared_memory->n = n;
     shared_memory->m = m;
     shared_memory->max_runtime = static_cast<int>(ceil(log2(n)));
     shared_memory->layer = 0;
-    shared_memory->barrier = new Barrier(m);
+    shared_memory->barrier_count = 0;
+    shared_memory->barrier_phase = 0;
 
+    // Read input file
+    process_input_file(input_file, shared_memory->A, n);
 
-    //read input file
-    process_input_file(input_file,shared_memory->A,n);
-
-    //initialize B as A for now
+    // Initialize B as A for now
     for (int i = 0; i < n; i++) {
         shared_memory->B[i] = shared_memory->A[i];
     }
     
-    //create worker processes
+    // Create barrier with shared memory
+    Barrier barrier(&shared_memory->barrier_count, &shared_memory->barrier_phase, m);
+    
+    // Create worker processes
     vector<pid_t> child_processes;
-    for (int i = 0; i < m; i ++){
+    for (int i = 0; i < m; i++) {
         pid_t pid = fork();
 
-        //if in child proccess
-        if (pid == 0){
-            prefix_sum(shared_memory, i); // i keeps tracks of the actual process num, pid doesnt so use i instead
+        // If in child process
+        if (pid == 0) {
+            prefix_sum(shared_memory, i); // i keeps tracks of the actual process num
 
-            //detach from segment
+            // Detach from segment
             shmdt(shared_memory);
             exit(0);
         }
-        //parent process
-        else if (pid > 0){
+        // Parent process
+        else if (pid > 0) {
             child_processes.push_back(pid);
         }
-        //failure
+        // Failure
         else {
             fprintf(stderr, "Error: process creation failed.\n");
             exit(1);
         }
     }
 
-    //wait for all proccesses to finish
+    // Wait for all processes to finish
     for (pid_t child : child_processes) {
-        waitpid(child, nullptr, 0); //wait for child to finish
+        waitpid(child, nullptr, 0);
     }
 
-    //write output file
+    // Write output file
     write_output_file(output_file, shared_memory->B, n);
     
-    //clean memory
-    delete shared_memory->barrier; //deallocate memory for barrier
-    shmdt(shared_memory); //detach process from memory segment
-    shmctl(shmid, IPC_RMID, nullptr); //delete shared memory segment completely
+    // Clean memory
+    shmdt(shared_memory); // Detach process from memory segment
+    shmctl(shmid, IPC_RMID, nullptr); // Delete shared memory segment completely
 
     return 0;
 }
 
 void process_input_file(const string &input_file, int *A, int n) {
     ifstream input_file_stream(input_file);
-    for (int i = 0; i < n; i++){
+    for (int i = 0; i < n; i++) {
         input_file_stream >> A[i];
     }
     input_file_stream.close();
@@ -184,36 +178,64 @@ void process_input_file(const string &input_file, int *A, int n) {
 
 void write_output_file(const string &output_file, int *B, int n) {
     ofstream output_file_steam(output_file);
-    for (int i = 0; i < n; i++){
+    for (int i = 0; i < n; i++) {
         output_file_steam << B[i] << endl;
     }
     output_file_steam.close();
 }
-void prefix_sum(SharedMemory *shared_memory, int pid){
-    int n = shared_memory->n; //total elems
-    int m = shared_memory->m; //total processes
-    int max_runtime = shared_memory->max_runtime; //max runtime for hillis steele
+
+void prefix_sum(SharedMemory *shared_memory, int pid) {
+    int n = shared_memory->n; // Total elements
+    int m = shared_memory->m; // Total processes
+    int max_runtime = shared_memory->max_runtime; // Max runtime
     int elems_per_process = n / m;
-    int leftover_elems =  n % m;
+    int leftover_elems = n % m;
 
     int start_idx, end_idx;
 
-    // process elements [start,end). The first (leftover_elems) will process 1 more than elems_per_process
-    if (pid < leftover_elems){
-        start_idx = pid * elems_per_process + pid;
+    // Calculate start and end indices for this process
+    if (pid < leftover_elems) {
+        // First 'leftover_elems' processes handle (elems_per_process + 1) elements each
+        start_idx = pid * (elems_per_process + 1);
         end_idx = start_idx + elems_per_process + 1;
-    }
-    else {
-        start_idx = (pid * elems_per_process) + leftover_elems ;
+    } else {
+        // Remaining processes handle elems_per_process elements each
+        start_idx = (leftover_elems * (elems_per_process + 1)) + 
+                   ((pid - leftover_elems) * elems_per_process);
         end_idx = start_idx + elems_per_process;
     }
 
+    Barrier barrier(&shared_memory->barrier_count, &shared_memory->barrier_phase, m);
+    
+    // initilize temporary array 
     vector<int> temp(n);
 
-    for(int layer =  0; layer < max_runtime; layer ++) {
-        if (pid == 0){
-            shared_memory->layer = 0;
+    // Hillis-Steele
+    for (int layer = 0; layer < max_runtime; layer++) {
+        // update layer if needed
+        if (pid == 0) {
+            shared_memory->layer = layer;
         }
+        
+        // Wait
+        barrier.arrive_and_wait(pid);
+        
+        // Copy current output to temp array
+        for (int i = 0; i < n; i++) {
+            temp[i] = shared_memory->B[i];
+        }
+        
+        // Calculate distance of complement for this layer
+        int complement_distance = 1 << layer;
+        
+        // Calculate sum
+        for (int i = start_idx; i < end_idx; i++) {
+            // only sum complement if it exists
+            if (i >= complement_distance) {
+                shared_memory->B[i] = temp[i] + temp[i - complement_distance];
+            }
+        }
+        
+        barrier.arrive_and_wait(pid);
     }
-
 }
